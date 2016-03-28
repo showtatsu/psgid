@@ -1,0 +1,39 @@
+##########################################
+# default.yaml
+#    for Plack::Runner and Plack::Builder
+#  
+#  About Server::Starter's options,
+#     see our init scripts.
+#   
+
+##########################################
+### PSGI Server options
+server: "Starlet"
+max_workers: 500
+min_reqs_per_child: 5000
+max_reqs_per_child: 10000
+spawn_interval: 0.1
+
+##########################################
+### PSGI applications mapping
+
+#app_store: "/webcontentas/psgi_apps"
+
+app_mounter:
+  - path: "/show_env"
+    app:  "./sample_apps/psgi_info.psgi"
+
+
+##########################################
+### Middlewares
+
+### for ... AccessLog::Timed
+log_file: "/var/log/psgid/default.log"
+log_format: "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\" %D"
+
+### for ... ServerStatus::Lite
+server_status_path: "/status"
+server_status_allow:
+  - "127.0.0.1"
+
+

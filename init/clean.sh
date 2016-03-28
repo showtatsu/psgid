@@ -1,0 +1,9 @@
+unset PORT
+unset INTERVAL
+unset USER
+unset CONFIG
+unset PIDFILE
+unset BOOTLOG
+unset EXECUTER
+unset KILLTIMER
+unset STATUS_URL

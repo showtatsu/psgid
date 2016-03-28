@@ -1,0 +1,168 @@
+#!/usr/bin/perl
+# PSGI application server's bootstrap.
+use strict;
+use warnings;
+use POSIX qw/strftime/;
+use Plack::Util;
+use Plack::Builder;
+use Plack::Runner;
+use FindBin;
+use File::Basename;
+use File::Spec;
+use File::RotateLogs;
+use URI;
+use YAML::Syck;
+use Data::Dumper;
+use Getopt::Long qw(:config posix_default no_ignore_case gnu_compat);
+
+OPTIONS:
+## Startup parameters ...
+GetOptions(
+    'config=s' => \my $opt_config,
+);
+$opt_config = shift @ARGV unless( $opt_config );
+die "Config not found. Use --config=/path/to/config option, and check your config file."
+    unless( -f $opt_config );
+
+my $config = YAML::Syck::LoadFile( $opt_config );
+
+my %defaults = (
+    log_file        => "/var/log/psgid/access.log",
+    log_format      => '%h %l %u %t "%r" %>s %b "%{Referer}i" "%{User-agent}i" %D',
+    app_store       => undef,
+    log_rotate_time => 86400,
+    log_rotate_max  => 86400 * 14,
+    status_access   => undef,
+    status_path     => '/status',
+);
+
+my $app_router   = $config->{app_mounter}         || $defaults{app_mounter};
+my $app_store    = pathfix( $config->{app_store} || $defaults{app_store} );
+my $logfile      = pathfix( $config->{log_file}  || $defaults{log_file}  );
+my $logformat    = $config->{log_format}          || $defaults{log_format} ;
+my $status_allow = $config->{server_status_allow} || $defaults{server_status_allow};
+my $status_path  = $config->{server_status_path}  || $defaults{server_status_path};
+my %logrotate    = (
+    rotationtime => $config->{log_rotate_time} || $defaults{log_rotate_time},
+    maxage       => $config->{log_rotate_max}  || $defaults{log_rotate_max} ,
+);
+my $plack_options = load_extra_options($config, +{
+        server             => '--server',
+        max_workers        => '--max-workers',
+        min_reqs_per_child => '--min-reqs-per-child',
+        max_reqs_per_child => '--max-reqs-per-child',
+        spawn_interval     => '--spawn_interval',
+    });
+# Forced options ..
+push(@$plack_options, '--daemonize');
+push(@$plack_options, '-E', 'production');
+
+## Applicaiton code ..
+MAIN:
+
+my %library = ();
+
+if ($app_router and ref $app_router eq "ARRAY") {
+    print STDERR logtime() . "Try opening PSGI application by router ...\n";
+    foreach my $router(@$app_router) {
+        my $mount_url = $router->{"path"};
+        my $psgi_path = $router->{"app"};
+        if ($mount_url and $psgi_path) {
+            $psgi_path = pathfix( $psgi_path );
+            print STDERR "  - file [$psgi_path] =>  mount to [$mount_url]\n";
+            my $app = Plack::Util::load_psgi($psgi_path);
+            $library{"$mount_url"} = $app;
+        }
+    }
+}
+
+if ($app_store) {
+    print STDERR logtime() . "Try opening PSGI application dir=[$app_store] ...\n";
+    opendir(my $dh, $app_store) or die $!;
+    while(my $file = readdir $dh) {
+        chomp($file);
+        my $fullpath = "$app_store/$file";
+        my $filename = File::Basename::basename( $file );
+        if ( $filename =~ m/^([0-9A-Za-z._-]+)\.psgi$/ ) {
+            my $appname  = $1;
+            print STDERR "  - file [$fullpath] =>  mount to [/$appname]\n";
+            if(exists $library{"/$appname"}) {
+                warn "Path conflicted [/$appname], Skipped." if exists $library{"/$appname"};
+            } else {
+                $library{ "/$appname" } = Plack::Util::load_psgi($fullpath);
+            }
+        }
+    }
+    closedir($dh);
+}
+
+my $rotatelogs = File::RotateLogs->new(
+    logfile  => "${logfile}.%Y%m%d%H%M",
+    linkname => "${logfile}",
+    %logrotate);
+
+
+my $application = builder {
+    enable_if { $_[0]->{'REMOTE_ADDR'} eq '127.0.0.1' } 'ReverseProxy';
+    
+    if ( $status_allow ) {
+        print STDERR logtime() . "Loading ServerStatus::Lite\n";
+        print STDERR "  - mount to [$status_path]\n";
+        print STDERR "  - allowed access from [$_]\n" foreach @$status_allow;
+        enable 'ServerStatus::Lite' => (
+            path       => $status_path,
+            allow      => $status_allow,
+            scoreboard => File::Spec->tmpdir(),
+            );
+    }
+
+    enable 'AccessLog::Timed' => (
+        format => $logformat,
+        logger => sub { $rotatelogs->print(@_); },
+        );
+    
+    enable 'HTTPExceptions'; # Error handling for loggin middlewares
+    
+    my $handler = sub {
+        my $env = shift;
+        if ( my $ap = $library{$env->{PATH_INFO}} ) {
+            return $ap->($env);
+        } else {
+            return [404,[],[]];
+        }
+    };
+    return $handler;
+};
+
+my $plackup = Plack::Runner->new;
+$plackup->parse_options( @$plack_options );
+
+print STDERR logtime() . "Starting application by Plack::Runner...\n";
+print STDERR " - options\n";
+print STDERR Dumper @$plack_options;
+$plackup->run( $application );
+
+
+#############################
+sub load_extra_options {
+    my ($conf, $support) = @_;
+    my $opt = [];
+    foreach (keys %$support) {
+        if(exists $conf->{$_}) {
+            push(@$opt, $support->{$_}, $conf->{$_});
+        }
+    }
+    return $opt;
+}
+
+sub pathfix {
+    my $path = shift;
+    return unless defined $path;
+    return $path if ($path =~ m<^\/>);
+    return URI->new($path)->abs("${FindBin::Bin}/")->as_string;
+}
+
+sub logtime {
+    return strftime('%Y-%m-%d %H:%M:%S ',localtime); 
+}
+
